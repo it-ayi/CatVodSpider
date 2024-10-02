@@ -25,6 +25,10 @@ public class Douban extends Spider {
     private final String siteUrl = "https://frodo.douban.com/api/v2";
     private final String apikey = "?apikey=0ac44ae016490db2204ce0a042db2916";
     private String extend;
+    // 存储设备的Android ID和私钥
+    private String androidId;
+    private PrivateKey privateKey;
+
 
     private Map<String, String> getHeader() {
         Map<String, String> header = new HashMap<>();
@@ -40,6 +44,159 @@ public class Douban extends Spider {
         this.extend = extend;
     }
 
+
+
+    // 初始化方法，获取Android ID并执行登录流程
+    @Override
+    public void init(Context context) {
+        try {
+            // 尝试获取设备的Android ID
+            androidId = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ANDROID_ID);
+
+            // 如果androidId为空，从缓存中获取或生成一个新的ID
+            if (androidId == null) {
+                androidId = getFromCache();
+                if (androidId == null) {
+                    androidId = UUID.randomUUID().toString();
+                    storeInCache(androidId);
+                }
+            }
+
+            // 获取私钥
+            fetchPrivateKey();
+
+            // 发送POST请求进行身份验证
+            this.sendPost();
+        } catch (Exception e) {
+            System.err.println("发生错误: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+
+    /////////////////////////////////////
+
+    private void fetchPrivateKey() throws Exception {
+        HttpURLConnection connection = null;
+        try {
+            // 创建HTTP连接请求私钥
+            URL url = new URL("https://app.ysctv.cn/API/getPrivateKey.php");
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("GET");
+
+            // 获取服务器响应并解析私钥
+            String keyPEM = getResponse(connection);
+            keyPEM = keyPEM.replace("-----BEGIN PRIVATE KEY-----", "")
+                    .replace("-----END PRIVATE KEY-----", "")
+                    .replaceAll("\\s", "");
+
+            // 解码私钥并生成PrivateKey对象
+            byte[] decodedKey = Base64.getDecoder().decode(keyPEM);
+            PKCS8EncodedKeySpec spec = new PKCS8EncodedKeySpec(decodedKey);
+            KeyFactory keyFactory = KeyFactory.getInstance("RSA");
+            this.privateKey = keyFactory.generatePrivate(spec);
+
+        } finally {
+            // 断开连接
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    // 生成签名
+    public String generateSignature(String data) throws Exception {
+        // 创建Signature对象，使用私钥生成签名
+        Signature privateSignature = Signature.getInstance("SHA256withRSA");
+        privateSignature.initSign(privateKey);
+        privateSignature.update(data.getBytes("UTF-8"));
+
+        // 返回Base64编码的签名
+        byte[] signature = privateSignature.sign();
+        return Base64.getEncoder().encodeToString(signature);
+    }
+
+    // 发送POST请求以进行身份验证
+    public void sendPost() {
+        HttpURLConnection postConn = null;
+        try {
+            // 创建HTTP连接请求进行身份验证
+            URL postUrl = new URL("https://app.ysctv.cn/Authn.php");
+            postConn = (HttpURLConnection) postUrl.openConnection();
+            postConn.setRequestMethod("POST");
+            postConn.setDoOutput(true);
+            postConn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+
+            // 准备请求参数
+            long timestamp = System.currentTimeMillis();
+            String rawData = "timestamp=" + timestamp + "&androidId=" + androidId;
+            String signature = generateSignature(rawData);
+            String urlParameters = rawData + "&signature=" + signature;
+
+            // 发送请求
+            try (OutputStream os = postConn.getOutputStream()) {
+                os.write(urlParameters.getBytes("UTF-8"));
+                os.flush();
+            }
+
+            // 处理服务器响应
+            String response = getResponse(postConn);
+            System.out.println("服务器响应: " + response);
+
+        } catch (Exception e) {
+            System.err.println("发送POST请求失败");
+            e.printStackTrace();
+        } finally {
+            // 断开连接
+            if (postConn != null) {
+                postConn.disconnect();
+            }
+        }
+    }
+
+    // 获取HTTP连接的响应内容
+    private String getResponse(HttpURLConnection conn) throws Exception {
+        StringBuilder content = new StringBuilder();
+        try (BufferedReader in = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"))) {
+            String inputLine;
+            // 逐行读取响应内容
+            while ((inputLine = in.readLine()) != null) {
+                content.append(inputLine);
+            }
+        }
+        return content.toString(); // 返回响应内容
+    }
+
+    // 从缓存获取 androidId
+    private String getFromCache() {
+        try {
+            URL url = new URL("http://127.0.0.1:9978/cache?do=get&key=androidId");
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+
+            String response = getResponse(conn);
+            if (!response.isEmpty()) {
+                return response;
+            }
+        } catch (Exception e) {
+            System.err.println("无法从缓存获取androidId: " + e.getMessage());
+        }
+        return null;
+    }
+
+    // 将生成的UUID存储到缓存中
+    private void storeInCache(String uuid) {
+        try {
+            URL url = new URL("http://127.0.0.1:9978/cache?do=set&key=androidId&value=" + uuid);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+            conn.getInputStream().close(); // 执行请求
+        } catch (Exception e) {
+            System.err.println("无法将androidId存储到缓存中: " + e.getMessage());
+        }
+    }
+
+    ///////////////////////////////////////////////////////////////////////////////////////
     @Override
     public String homeContent(boolean filter) throws Exception {
         List<Class> classes = new ArrayList<>();
